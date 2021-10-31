@@ -60,6 +60,33 @@ def boxes_to_layout(vecs, boxes, obj_to_img, H, W=None, pooling='sum'):
   return out
 
 
+def boxes_to_grid_azade(vecs, boxes, H, W=None):
+  """
+  Inputs:
+  - vecs: Tensor of shape (O, D) giving vectors
+  - boxes: Tensor of shape (O, 4) giving bounding boxes in the format
+    [x0, y0, x1, y1] in the [0, 1] coordinate space
+  - obj_to_img: LongTensor of shape (O,) mapping each element of vecs to
+    an image, where each element is in the range [0, N). If obj_to_img[i] = j
+    then vecs[i] belongs to image j.
+  - H, W: Size of the output
+
+  Returns:
+  - out: Tensor of shape (N, D, H, W)
+  """
+  O, D = vecs.size()
+  if W is None:
+    W = H
+
+  grid = _boxes_to_grid(boxes, H, W)
+
+  # If we don't add extra spatial dimensions here then out-of-bounds
+  # elements won't be automatically set to 0
+  img_in = vecs.view(O, D, 1, 1).expand(O, D, 8, 8)
+  sampled = F.grid_sample(img_in, grid)   # (O, D, H, W)
+
+  return sampled
+
 def masks_to_layout(vecs, boxes, masks, obj_to_img, H, W=None, pooling='sum', front_idx=None):
   """
   Inputs:
@@ -170,7 +197,7 @@ def _pool_samples(samples, obj_to_img, pooling='sum'):
     ones = torch.ones(O, dtype=dtype, device=device)
     obj_counts = torch.zeros(N, dtype=dtype, device=device)
     obj_counts = obj_counts.scatter_add(0, obj_to_img, ones)
-    print(obj_counts)
+    #print(obj_counts)
     obj_counts = obj_counts.clamp(min=1)
     out = out / obj_counts.view(N, 1, 1, 1)
 

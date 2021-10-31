@@ -39,7 +39,7 @@ from imageio import imsave
 
 from PerceptualSimilarity import models
 
-GPU = 1
+GPU = 0
 EVAL_ALL = True         # evaluate on all bounding boxes (batch size=1)
 IGNORE_SMALL = True
 

@@ -29,7 +29,7 @@ import sys
 from builtins import enumerate
 
 import networkx as nx
-from grave import plot_network
+from grave.grave import plot_network
 from grave.style import use_attributes
 import matplotlib.pyplot as plt
 import os, json, argparse
@@ -258,10 +258,6 @@ class ApplicationWindow(QtWidgets.QMainWindow):
             self.comboBox_obj2.setCurrentIndex(combo_idx)
             graph.nodes[node]['size'] = 2500
 
-            for edge_attribute in graph[node].values():
-                edge_attribute['arrowsize'] = 200
-                edge_attribute['arrowstyle'] = "fancy"
-
             # draw object box whenever an object node is clicked
             if self.selected_node.split(".")[0] in vocab["object_idx_to_name"]:
                 idx = int(self.selected_node.split(".")[1])
@@ -307,9 +303,6 @@ class ApplicationWindow(QtWidgets.QMainWindow):
             self.graph.nodes[node]['edgecolor'] = 'g'
             self.graph.nodes[node]['size'] = 2500
 
-            for edge_attribute in self.graph[node].values():
-                edge_attribute['arrows'] = True
-
         self.set_graph()
         self.graphCounter += 1
 
@@ -327,9 +320,9 @@ class ApplicationWindow(QtWidgets.QMainWindow):
         else:
             layout = self.g_layout
         self._static_ax.clear()
-        self.art = plot_network(self.graph, layout=layout, ax=self._static_ax, #self.g_layout, "spring"
-                                node_style=use_attributes(),  # use_attributes(), #node_options, #dict(node_size=50),
-                                edge_style=use_attributes(),  # ) #edge_options) # #,
+        self.art = plot_network(self.graph, layout=layout, ax=self._static_ax,
+                                node_style=use_attributes(),
+                                edge_style=use_attributes(),
                                 node_label_style={'font_size': '10', 'font_weight': 'bold'}) # layout=self.g_layout
 
         self.art.set_picker(10)
@@ -547,8 +540,7 @@ class ApplicationWindow(QtWidgets.QMainWindow):
             self.graph.nodes[node]['color'] = 'w'
             self.graph.nodes[node]['edgecolor'] = 'g'
             self.graph.nodes[node]['size'] = 2500
-            for edge_attribute in self.graph[node].values():
-                edge_attribute['arrows'] = True
+
         self.curr_triples.append([subject_tag, predicate_tag, object_tag])
 
         self.mode = "addition"

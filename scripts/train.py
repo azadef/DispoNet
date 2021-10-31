@@ -28,14 +28,16 @@ import tqdm
 import numpy as np
 import torch
 import torch.optim as optim
+import torch.nn as nn
 
+from collections import defaultdict
 from torchvision.utils import make_grid
 from tensorboardX import SummaryWriter
 
 from simsg.data import imagenet_deprocess_batch
 
 from simsg.discriminators import PatchDiscriminator, AcCropDiscriminator, MultiscaleDiscriminator, divide_pred
-from simsg.losses import get_gan_losses, gan_percept_loss, GANLoss, VGGLoss
+from simsg.losses import get_gan_losses, gan_percept_loss, GANLoss, VGGLoss, get_loss_f
 from simsg.metrics import jaccard
 from simsg.model import SIMSGModel
 from simsg.utils import int_tuple
@@ -43,8 +45,10 @@ from simsg.utils import timeit, bool_flag, LossManager
 
 from simsg.loader_utils import build_train_loaders
 from scripts.train_utils import *
+from simsg.VITAE import vae_loss
 
 torch.backends.cudnn.benchmark = True
+torch.autograd.set_detect_anomaly(True)
 
 # for clevr, change to './datasets/clevr/target'
 DATA_DIR = os.path.expanduser('./datasets/vg')
@@ -67,7 +71,7 @@ def argument_parser():
   parser.add_argument('--image_size', default='64,64', type=int_tuple)
   parser.add_argument('--num_train_samples', default=None, type=int)
   parser.add_argument('--num_val_samples', default=1024, type=int)
-  parser.add_argument('--shuffle_val', default=True, type=bool_flag)
+  parser.add_argument('--shuffle_val', default=False, type=bool_flag)
   parser.add_argument('--loader_num_workers', default=4, type=int)
   parser.add_argument('--include_relationships', default=True, type=bool_flag)
 
@@ -97,6 +101,8 @@ def argument_parser():
   parser.add_argument('--feats_out_gcn', default=True, type=bool_flag)
   parser.add_argument('--is_baseline', default=False, type=int)
   parser.add_argument('--is_supervised', default=False, type=int)
+  parser.add_argument('--is_disentangled', default=False, type=int)
+  parser.add_argument('--gcn_mode', default='GCN', choices=['GCN', 'DisenGCN', 'FactorGCN'])
 
   # Generator losses
   parser.add_argument('--l1_pixel_loss_weight', default=1.0, type=float)
@@ -177,7 +183,9 @@ def build_model(args, vocab):
       'is_baseline': args.is_baseline,
       'is_supervised': args.is_supervised,
       'spade_blocks': args.spade_gen_blocks,
-      'layout_pooling': args.layout_pooling
+      'layout_pooling': args.layout_pooling,
+      'is_disentangled': args.is_disentangled,
+      'GCN_mode': args.gcn_mode
     }
 
     model = SIMSGModel(**kwargs)
@@ -251,7 +259,10 @@ def check_model(args, t, loader, model):
 
       model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, masks_gt=model_masks,
                         src_image=imgs_in, imgs_src=imgs_src)
-      imgs_pred, boxes_pred, masks_pred, _, _ = model_out
+      if args.is_disentangled:
+        imgs_pred, boxes_pred, masks_pred, layout_mask, _, vae_params = model_out #imgs_pred, boxes_pred, masks_pred, _, _, latent_dist, latent_sample = model_out
+      else:
+        imgs_pred, boxes_pred, masks_pred, _, _ = model_out
 
       skip_pixel_loss = False
       total_loss, losses = calculate_model_losses(
@@ -312,12 +323,15 @@ def main(args):
   print(args)
   check_args(args)
   float_dtype = torch.cuda.FloatTensor
+  #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
   writer = SummaryWriter(args.log_dir) if args.log_dir is not None else None
 
   vocab, train_loader, val_loader = build_train_loaders(args)
   model, model_kwargs = build_model(args, vocab)
   model.type(float_dtype)
+  #model = nn.DataParallel(model, device_ids=[0, 1])
+  #model.to(device)
   print(model)
 
   # use to freeze parts of the network (VGG feature extraction)
@@ -378,12 +392,14 @@ def main(args):
     t, epoch = 0, 0
     checkpoint = init_checkpoint_dict(args, vocab, model_kwargs, d_obj_kwargs, d_img_kwargs)
 
+  if args.is_disentangled:
+    print("Disentangled")
   while True:
     if t >= args.num_iterations:
       break
     epoch += 1
     print('Starting epoch %d' % epoch)
-
+    storer = defaultdict(list)
     for batch in tqdm.tqdm(train_loader):
       if t == args.eval_mode_after:
         print('switching to eval mode')
@@ -397,6 +413,8 @@ def main(args):
 
       if args.dataset == "vg" or (args.dataset == "clevr" and not args.is_supervised):
         imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = batch
+        #imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = imgs.to(device), objs.to(device), boxes.to(device)\
+        #  , triples.to(device), obj_to_img.to(device), triple_to_img.to(device), imgs_in.to(device)
       elif args.dataset == "clevr":
         imgs, imgs_src, objs, objs_src, boxes, boxes_src, triples, triples_src, obj_to_img, \
         triple_to_img, imgs_in = batch
@@ -404,10 +422,21 @@ def main(args):
       with timeit('forward', args.timing):
         model_boxes = boxes
         model_masks = masks
+        #Yousef
+        #<class 'torch.Tensor'> <class 'torch.Tensor'> <class 'torch.Tensor'>
+        #torch.Size([275]) torch.Size([355, 3]) torch.Size([275])
 
+        # print(type(objs),type(triples),type(obj_to_img),type(model_boxes),type(model_masks),type(imgs_src))
+        # print(objs.shape, triples.shape, obj_to_img.shape,model_boxes.shape)
+        # input()
+#
         model_out = model(objs, triples, obj_to_img,
                           boxes_gt=model_boxes, masks_gt=model_masks, src_image=imgs_in, imgs_src=imgs_src, t=t)
-        imgs_pred, boxes_pred, masks_pred, layout_mask, _ = model_out
+
+        if args.is_disentangled:
+            imgs_pred, boxes_pred, masks_pred, layout_mask, _, vae_params = model_out #latent_dist, latent_sample
+        else:
+            imgs_pred, boxes_pred, masks_pred, layout_mask, _ = model_out
 
       with timeit('loss', args.timing):
         # Skip the pixel loss if not using GT boxes
@@ -415,6 +444,29 @@ def main(args):
         total_loss, losses = calculate_model_losses(
                                 args, skip_pixel_loss, imgs, imgs_pred,
                                 boxes, boxes_pred)
+
+      if args.is_disentangled:
+        # loss_f = get_loss_f("betaB", n_data=len(train_loader.dataset)) #VAE
+        # disen_loss = loss_f(imgs, imgs_pred, latent_dist, True,
+        #                        storer, latent_sample=latent_sample)
+        eq_samples = 1
+        iw_samples = 1
+        warmup = 1
+        beta = 1.0
+        latent_dim = 2
+        outputdensity = 'bernoulli'
+        disen_loss = vae_loss(imgs, *vae_params,
+                              eq_samples, iw_samples,
+                              latent_dim,
+                              epoch, warmup, beta,
+                              outputdensity)
+        lower_bound, recon_term, kl_term = disen_loss
+        total_loss = add_loss(total_loss, -lower_bound, losses, 'disen_loss_ELBO', 1)
+        #total_loss = add_loss(total_loss, recon_term, losses, 'disen_loss_REC', 1)
+        for kl_num, kl_loss in enumerate(kl_term):
+          total_loss = add_loss(total_loss, -kl_loss, losses, 'disen_loss_KL' + str(kl_num), 1)
+        #total_loss = add_loss(total_loss, kl_term, losses, 'disen_loss_KL', 1)
+        #total_loss = add_loss(total_loss, disen_loss, losses, 'disen_loss', 1)
 
       if obj_discriminator is not None:
 

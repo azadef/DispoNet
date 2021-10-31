@@ -88,7 +88,7 @@ class SceneGraphNoPairsDataset(Dataset):
     - triples: LongTensor of shape (num_triples, 3) where triples[t] = [i, p, j]
       means that (objs[i], p, objs[j]) is a triple.
     """
-    img_path = os.path.join(self.image_dir, self.image_paths[index])
+    img_path = os.path.join(self.image_dir, self.image_paths[index].decode("utf-8"))
 
     # use for the mix strings and bytes error
     #img_path = os.path.join(self.image_dir, self.image_paths[index].decode("utf-8"))

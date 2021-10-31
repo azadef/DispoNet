@@ -1,13 +1,13 @@
 # arguments for easier parsing
 seed: 1
-gpu: 0
+gpu: 1
 
 # DATA OPTIONS
 dataset: vg
 vg_image_dir: ./datasets/vg/images
-output_dir: experiments/vg_disenobjs_layout
+output_dir: experiments/vg_disen_objs_gcn
 checkpoint_name: spade_64_vg
-log_dir: experiments/vg_disenobjs_layout/logs/spade_64_vg
+log_dir: experiments/vg_disen_objs_gcn/logs/spade_64_vg
 
 # ARCHITECTURE OPTIONS
 image_size: !!python/tuple [64, 64]
@@ -37,7 +37,7 @@ feats_out_gcn: True
 is_baseline: False
 is_supervised: False
 is_disentangled: True
-gcn_mode: GCN
+gcn_mode: DisenGCN
 
 # LOGGING OPTIONS
 print_every: 500
