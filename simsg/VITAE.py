@@ -5,45 +5,45 @@ import numpy as np
 import math
 c = - 0.5 * math.log(2*math.pi)
 
-# # %%
-# try:
-#     from libcpab import cpab
-#
-#
-#     class ST_CPAB(nn.Module):
-#         def __init__(self, input_shape):
-#             super(ST_CPAB, self).__init__()
-#             self.input_shape = input_shape
-#             self.cpab = cpab([2, 4], backend='pytorch', device='gpu',
-#                              zero_boundary=True,
-#                              volume_perservation=False)
-#
-#         def forward(self, x, theta, inverse=False):
-#             if inverse:
-#                 theta = -theta
-#             out = self.cpab.transform_data(data=x,
-#                                            theta=theta,
-#                                            outsize=self.input_shape[1:])
-#             return out
-#
-#         def trans_theta(self, theta):
-#             return theta
-#
-#         def dim(self):
-#             return self.cpab.get_theta_dim()
-# except Exception as e:
-#     print('Could not import libcpab, error was')
-#     print(e)
-#
-#
-#     class ST_CPAB(nn.Module):
-#         def __init__(self, input_shape):
-#             super(ST_CPAB, self).__init__()
-#             self.input_shape = input_shape
-#
-#         def forward(self, x, theta, inverse=False):
-#             raise ValueError('''libcpab was not correctly initialized, so you
-#                              cannot run with --stn_type cpab''')
+# %%
+
+try:
+    from libcpab import Cpab
+except:
+    print("Could not import cpab")
+
+class ST_CPAB(nn.Module):
+    def __init__(self, input_shape):
+        super(ST_CPAB, self).__init__()
+        self.input_shape = input_shape
+        self.cpab = Cpab([2, 4], backend='pytorch', device='gpu',zero_boundary=True, volume_perservation=False)
+
+    def forward(self, x, theta, inverse=False):
+        if inverse:
+            theta = -theta
+        #theta = theta.cpu()
+        #x = x.cpu()
+        #theta = theta.view(-1, 2, 3)
+        output_size = x.shape #torch.Size([x.shape[0], self.input_shape])
+        #print(output_size)
+        #x = theta.backend.to(x, device="gpu")
+        #x = x.permute(0, 3, 1, 2)
+        x = x.permute(0, 3, 1, 2)
+
+        #print("CPAB func, vitae", x.shape, theta.shape, output_size)
+        out = self.cpab.transform_data(data=x,
+                                       theta=theta,
+                                       outsize=(output_size[1], output_size[2])) #self.input_shape[1:]
+        # Get the corresponding numpy arrays in correct format
+        out = out.permute(0, 2, 3, 1)
+        return out
+
+    def trans_theta(self, theta):
+        return theta
+
+    def dim(self):
+        return self.cpab.get_theta_dim()
+
 
 
 class ST_Affine(nn.Module):
@@ -186,6 +186,8 @@ class mlp_decoder(nn.Module):
     def forward(self, z):
         x_mu = self.decoder_mu(z).reshape(-1, self.output_shape)
         x_var = self.decoder_var(z).reshape(-1, self.output_shape)
+        x_var = x_var.clone()
+        x_var[x_var != x_var] = 0
         return x_mu, x_var
 
 
@@ -208,15 +210,22 @@ class encoder_vae(nn.Module):
             nn.LeakyReLU(),
             #nn.Linear(128, 128),
             #nn.LeakyReLU(),
-            nn.Linear(64, self.dim),
-            nn.Softplus()
+            nn.Linear(64, self.dim)#,
+
         )
+        self.softplus = nn.Softplus()
     def forward(self, x):
         #print('x before', x.shape)
         x = x.view(x.shape[0], -1)
         #print('x after', x.shape)
         z_mu = self.encoder_mu(x)
         z_var = self.encoder_var(x)
+        z_var = z_var.clone()
+        z_var[z_var != z_var] = 0
+        if torch.sum(torch.isnan(z_var)) or torch.sum(torch.isinf(z_var)):
+            print("z is nan")
+        z_var = self.softplus(z_var)
+        #z_var[z_var != z_var] = 0
         return z_mu, z_var
 
 
@@ -248,6 +257,7 @@ class encoder_vae_azade(nn.Module):
         z_mu = self.encoder_mu(x)
         z_var = self.encoder_var(x)
         #print('z after', z_mu.shape)
+        #z_var[z_var != z_var] = 0
         return z_mu, z_var
 
 class decoder_vae_azade(nn.Module):
@@ -279,10 +289,12 @@ class decoder_vae_azade(nn.Module):
         #print(x_mu.shape, self.output_shape)
         x_mu = x_mu.reshape(-1, self.output_shape)
         x_var = self.decoder_var(z).reshape(-1, self.output_shape)
+        x_var = x_var.clone()
+        x_var[x_var != x_var] = 0
         return x_mu, x_var
 
 class VITAE(nn.Module):
-    def __init__(self, in_dim, dis_objs):
+    def __init__(self, in_dim, dis_objs, stn_type):
         super(VITAE, self).__init__()
         self.dim = in_dim
 
@@ -293,9 +305,11 @@ class VITAE(nn.Module):
             self.encoder1 = encoder_vae_azade(in_dim) #encoder_mlp
             self.encoder2 = encoder_vae_azade(in_dim) #encoder_mlp
 
-        #self.stn = ST_CPAB(in_dim)
-        #self.stn = ST_Affine(in_dim)
-        self.stn = ST_AffineDiff(in_dim) #was in_dim
+        if stn_type == "cpab":
+            self.stn = ST_CPAB(in_dim)
+        else:
+            #self.stn = ST_Affine(in_dim)
+            self.stn = ST_AffineDiff(in_dim) #was in_dim
         #self.ST_type = ST_type
 
     def reparameterize(self, mu, var, x, eq_samples=1, iw_samples=1):
@@ -306,12 +320,32 @@ class VITAE(nn.Module):
         #print(output.shape)
         return output #.reshape(-1, latent_dim)
 
-    def forward(self, x, eq_samples=1, iw_samples=1, switch=1.0):
+    def forward_enc1(self, x, eq_samples=1, iw_samples=1):
         mu1, var1 = self.encoder1(x)
+        var1 = var1.clone()
+        var1[var1 != var1] = 0
         z1 = self.reparameterize(mu1, var1, x, eq_samples, iw_samples)
+        return mu1, var1, z1
 
+    def forward_enc2(self, x, eq_samples=1, iw_samples=1):
         mu2, var2 = self.encoder2(x)
+        var2 = var2.clone()
+        var2[var2 != var2] = 0
         z2 = self.reparameterize(mu2, var2, x, eq_samples, iw_samples)
+        return mu2, var2, z2
+
+    def forward(self, x, eq_samples=1, iw_samples=1, switch=1.0):
+        mu1, var1, z1 = self.forward_enc1(x)
+        mu2, var2, z2 = self.forward_enc2(x)
+        # mu1, var1 = self.encoder1(x)
+        # var1 = var1.clone()
+        # var1[var1 != var1] = 0
+        # z1 = self.reparameterize(mu1, var1, x, eq_samples, iw_samples)
+        #
+        # mu2, var2 = self.encoder2(x)
+        # var2 = var2.clone()
+        # var2[var2 != var2] = 0
+        # z2 = self.reparameterize(mu2, var2, x, eq_samples, iw_samples)
 
         return [z1, z2], [mu1, mu2], [var1, var2]
 
@@ -375,6 +409,8 @@ def vae_loss(x, x_mu, x_var, z, z_mus, z_vars, eq_samples, iw_samples,
     lower_bound = torch.mean(a_max) + torch.mean(torch.log(torch.mean(torch.exp(a - a_max), dim=2)))
     recon_term = log_px.sum(dim=3).mean()
     kl_term = [(lp - lq).sum(dim=3).mean() for lp, lq in zip(log_pz, log_qz)]
+    if torch.isnan(lower_bound) or torch.isnan(recon_term) or torch.isnan(kl_term[0]) or torch.isnan(kl_term[1]):
+        print(torch.isnan(lower_bound), torch.isnan(recon_term), torch.isnan(kl_term[0]), torch.isnan(kl_term[1]))
     return lower_bound, recon_term, kl_term
 
 
@@ -397,3 +433,35 @@ def kl_scaling(epoch=None, warmup=None):
         return 1
     else:
         return float(np.min([epoch / warmup, 1]))
+
+
+def test_cpab():
+    N = 1
+    in_shape = [416,17,13]
+    data = torch.zeros([N,416, 17, 13]).to("cuda")
+    device = data.device
+    print(device)
+    #device =
+    #data = np.tile(data[None], [N, 1, 1, 1])
+    print(data.shape)
+    T = Cpab([2, 4], backend="pytorch", device="gpu",
+             zero_boundary=True, volume_perservation=False, override=False)
+
+    # Sample random transformation
+    theta = T.sample_transformation(N).to(device)
+    print(theta.shape, theta.device)
+    data = T.backend.to(data, device="gpu") #, device=args.device
+
+    # Pytorch have other data format than tensorflow and numpy, color
+    # information is the second dim. We need to correct this before and after
+    data = data.permute(0, 3, 1, 2)
+
+    # Transform the images
+    t_data = T.transform_data(data, theta, outsize=(416,17))
+
+    # Get the corresponding numpy arrays in correct format
+    t_data = t_data.permute(0, 2, 3, 1)
+    print(t_data.shape)
+
+if __name__ == '__main__':
+    test_cpab()

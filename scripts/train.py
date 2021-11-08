@@ -40,7 +40,7 @@ from simsg.discriminators import PatchDiscriminator, AcCropDiscriminator, Multis
 from simsg.losses import get_gan_losses, gan_percept_loss, GANLoss, VGGLoss, get_loss_f
 from simsg.metrics import jaccard
 from simsg.model import SIMSGModel
-from simsg.utils import int_tuple
+from simsg.utils import int_tuple, str_tuple
 from simsg.utils import timeit, bool_flag, LossManager
 
 from simsg.loader_utils import build_train_loaders
@@ -52,12 +52,12 @@ torch.autograd.set_detect_anomaly(True)
 
 # for clevr, change to './datasets/clevr/target'
 DATA_DIR = os.path.expanduser('./datasets/vg')
-
+COCO_DIR = os.path.expanduser('~/MyHDD/Data/coco')
 
 def argument_parser():
   # helps parsing the same arguments in a different script
   parser = argparse.ArgumentParser()
-  parser.add_argument('--dataset', default='vg', choices=['vg', 'clevr'])
+  parser.add_argument('--dataset', default='vg', choices=['vg', 'clevr', 'coco'])
 
   # Optimization hyperparameters
   parser.add_argument('--batch_size', default=32, type=int)
@@ -65,7 +65,7 @@ def argument_parser():
   parser.add_argument('--learning_rate', default=2e-4, type=float)
 
   # Switch the generator to eval mode after this many iterations
-  parser.add_argument('--eval_mode_after', default=100000, type=int)
+  parser.add_argument('--eval_mode_after', default=300000, type=int)
 
   # Dataset options
   parser.add_argument('--image_size', default='64,64', type=int_tuple)
@@ -82,6 +82,28 @@ def argument_parser():
   parser.add_argument('--vocab_json', default=os.path.join(DATA_DIR, 'vocab.json'))
   parser.add_argument('--max_objects_per_image', default=10, type=int)
   parser.add_argument('--vg_use_orphaned_objects', default=True, type=bool_flag)
+
+  # Coco
+  # COCO-specific options
+  parser.add_argument('--coco_train_image_dir',
+           default=os.path.join(COCO_DIR, 'images/train2017'))
+  parser.add_argument('--coco_val_image_dir',
+           default=os.path.join(COCO_DIR, 'images/val2017'))
+  parser.add_argument('--coco_train_instances_json',
+           default=os.path.join(COCO_DIR, 'annotations/instances_train2017.json'))
+  parser.add_argument('--coco_train_stuff_json',
+           default=None)
+  parser.add_argument('--coco_val_instances_json',
+           default=os.path.join(COCO_DIR, 'annotations/instances_val2017.json'))
+  parser.add_argument('--coco_val_stuff_json',
+           default=None)
+  parser.add_argument('--instance_whitelist', default=None, type=str_tuple)
+  parser.add_argument('--stuff_whitelist', default=None, type=str_tuple)
+  parser.add_argument('--coco_include_other', default=False, type=bool_flag)
+  parser.add_argument('--min_object_size', default=0.02, type=float)
+  parser.add_argument('--min_objects_per_image', default=3, type=int)
+  parser.add_argument('--coco_stuff_only', default=True, type=bool_flag)
+  parser.add_argument('--coco_no_mask', default=False, type=bool_flag)
 
   # Generator options
   parser.add_argument('--mask_size', default=16, type=int) # Set this to 0 to use no masks
@@ -103,6 +125,8 @@ def argument_parser():
   parser.add_argument('--is_supervised', default=False, type=int)
   parser.add_argument('--is_disentangled', default=False, type=int)
   parser.add_argument('--gcn_mode', default='GCN', choices=['GCN', 'DisenGCN', 'FactorGCN'])
+  parser.add_argument('--stn_type', default='affine', choices=['cpab', 'affine'])
+  parser.add_argument('--vitae_mode', default='uncond', choices=['cond', 'uncond'])
 
   # Generator losses
   parser.add_argument('--l1_pixel_loss_weight', default=1.0, type=float)
@@ -185,7 +209,9 @@ def build_model(args, vocab):
       'spade_blocks': args.spade_gen_blocks,
       'layout_pooling': args.layout_pooling,
       'is_disentangled': args.is_disentangled,
-      'GCN_mode': args.gcn_mode
+      'GCN_mode': args.gcn_mode,
+      'stn_type': args.stn_type,
+      'vitae_mode': args.vitae_mode
     }
 
     model = SIMSGModel(**kwargs)
@@ -249,7 +275,7 @@ def check_model(args, t, loader, model):
       masks = None
       imgs_src = None
 
-      if args.dataset == "vg" or (args.dataset == "clevr" and not args.is_supervised):
+      if args.dataset == "vg" or args.dataset == "coco" or (args.dataset == "clevr" and not args.is_supervised):
         imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = batch
       elif args.dataset == "clevr":
         imgs, imgs_src, objs, objs_src, boxes, boxes_src, triples, triples_src, obj_to_img, \
@@ -332,7 +358,7 @@ def main(args):
   model.type(float_dtype)
   #model = nn.DataParallel(model, device_ids=[0, 1])
   #model.to(device)
-  print(model)
+  #print(model)
 
   # use to freeze parts of the network (VGG feature extraction)
   optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
@@ -411,7 +437,7 @@ def main(args):
       masks = None
       imgs_src = None
 
-      if args.dataset == "vg" or (args.dataset == "clevr" and not args.is_supervised):
+      if args.dataset == "vg" or args.dataset == "coco" or (args.dataset == "clevr" and not args.is_supervised):
         imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = batch
         #imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = imgs.to(device), objs.to(device), boxes.to(device)\
         #  , triples.to(device), obj_to_img.to(device), triple_to_img.to(device), imgs_in.to(device)
@@ -550,6 +576,13 @@ def main(args):
 
       optimizer.zero_grad()
       with timeit('backward', args.timing):
+        for param in model.parameters():
+          if not torch.isfinite(param.data).all():
+            print("param.data", param, torch.isfinite(param.data).all())
+          if param.grad is not None:
+            if not torch.isfinite(param.grad.data).all():
+              print("param.grad.data", param, torch.isfinite(param.grad.data).all(), "\n")
+
         total_loss.backward()
       optimizer.step()
 

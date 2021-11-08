@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from simsg.graph import GraphTripleConv, GraphTripleConvNet, DisenTripletGCN
+from simsg.graph import GraphTripleConv, GraphTripleConvNet, DisenTripletGCN, FactorTripletGCN
 from simsg.decoder import DecoderNetwork
 from simsg.layout import boxes_to_layout, masks_to_layout, boxes_to_grid_azade
 from simsg.layers import build_mlp
@@ -50,7 +50,7 @@ class SIMSGModel(nn.Module):
                  mask_size=None, mlp_normalization='none', layout_noise_dim=0,
                  img_feats_branch=True, feat_dims=128, is_baseline=False, is_supervised=False,
                  feats_in_gcn=False, feats_out_gcn=True, layout_pooling="sum",
-                 spade_blocks=False, GCN_mode="GCN", is_disentangled=True, dis_objs=True, **kwargs):
+                 spade_blocks=False, GCN_mode="DisenGCN", is_disentangled=True, dis_objs=True, stn_type="affine", vitae_mode="uncond", **kwargs):
 
         super(SIMSGModel, self).__init__()
 
@@ -68,6 +68,9 @@ class SIMSGModel(nn.Module):
         self.is_supervised = is_supervised
         self.is_disentangled = is_disentangled
         self.dis_objs = dis_objs
+        self.stn_type = stn_type
+        self.vitae_mode = vitae_mode
+        print("Disentangled: ", is_disentangled, "STN Type: ", stn_type, "VITAE Mode: ", vitae_mode)
         #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         if self.is_supervised:
@@ -153,7 +156,7 @@ class SIMSGModel(nn.Module):
         elif self.gcn_type == "FactorGCN":
             hyperpm.set_factorgnn()
             print("Using FactorGCN")
-            # self.gconv_net = FactorTripletGCN(hyperpm)
+            self.gconv_net = FactorTripletGCN(hyperpm)
         else:
             raise
 
@@ -173,14 +176,17 @@ class SIMSGModel(nn.Module):
             ref_input_dim = gconv_dim + layout_noise_dim + feat_dims
 
         if self.is_disentangled:
+            print("Disentangled")
             #self.latent_dim = 256
             #self.mu_logvar_gen = nn.Linear(gconv_dim, self.latent_dim * 2)
             if self.dis_objs:
-                self.VITAE = VITAE(gconv_dim, self.dis_objs)
-                self.vit_decoder = decoder_vae_azade(6, gconv_dim)
+                self.VITAE = VITAE(gconv_dim, self.dis_objs, self.stn_type)
+                #print("vitae stn dim: ", self.VITAE.stn.dim())
+                self.vit_decoder = decoder_vae_azade(self.VITAE.stn.dim(), gconv_dim) #was 6
             else:
-                self.VITAE = VITAE(ref_input_dim, self.dis_objs) #.to(self.device) #was gconv_dim *image_size[0]*image_size[1]
-                self.vit_decoder = decoder_vae_azade(6, ref_input_dim*image_size[0]*image_size[1]) #.to(self.device) #was gconv_dim
+                self.VITAE = VITAE(ref_input_dim, self.dis_objs, self.stn_type) #.to(self.device) #was gconv_dim *image_size[0]*image_size[1]
+
+                self.vit_decoder = decoder_vae_azade(self.VITAE.stn.dim(), ref_input_dim*image_size[0]*image_size[1]) #.to(self.device) #was gconv_dim
 
         decoder_kwargs = {
             'dims': (ref_input_dim,) + decoder_dims,
@@ -270,7 +276,7 @@ class SIMSGModel(nn.Module):
             return mean
 
     def obj_to_layout(self, obj_vecs, num_objs, feats_prior, boxes_gt, evaluating, in_image, obj_to_img, keep_box_idx,
-                                             keep_feat_idx, combine_gt_pred_box_idx, box_keep, feats_keep, imgs_src, masks_gt):
+                                             keep_feat_idx, combine_gt_pred_box_idx, box_keep, feats_keep, imgs_src, masks_gt, keep_image_idx=None):
         # Box prediction network
         boxes_pred = self.box_net(obj_vecs)
 
@@ -443,7 +449,8 @@ class SIMSGModel(nn.Module):
                 # fill with noise the high level visual features, if the feature is masked/dropped
                 normal_dist = tdist.Normal(loc=get_mean(self.spade_blocks), scale=get_std(self.spade_blocks))
                 highlevel_noise = normal_dist.sample([high_feats.shape[0]])
-                feats_prior = feats_prior + (highlevel_noise.cuda() * (1 - feats_keep))
+                if not self.is_disentangled:
+                    feats_prior = feats_prior + (highlevel_noise.cuda() * (1 - feats_keep))
 
             # when a query image is used to generate an object of the same category
             if query_feats is not None:
@@ -458,9 +465,6 @@ class SIMSGModel(nn.Module):
 
         pred_vecs = self.pred_embeddings(p)
 
-        #print(obj_vecs.shape, pred_vecs.shape, edges.shape)
-        #print(obj_vecs.min(), pred_vecs.min(), edges.min())
-        #print(obj_vecs.max(), pred_vecs.max(), edges.max())
         # GCN pass
         if self.gcn_type == "GCN":
             if isinstance(self.gconv, nn.Linear):
@@ -477,22 +481,36 @@ class SIMSGModel(nn.Module):
         disentangled_v3 = True
 
         if disentangled_v1:
-            #print("before: ",obj_vecs.shape)
             mu_logvar = self.mu_logvar_gen(obj_vecs)
             latent_dist = mu_logvar.view(-1, self.latent_dim, 2).unbind(-1)
             latent_sample = self.reparameterize(*latent_dist)
             obj_vecs = latent_sample
-            #print("after: ", obj_vecs.shape)
 
         if self.is_disentangled and self.dis_objs:
-            [z1, z2], [mu1, mu2], [var1, var2] = self.VITAE(obj_vecs)
-            theta_mean, theta_var = self.vit_decoder(z1)
+            if self.vitae_mode == "uncond":
+                [z1, z2], [mu1, mu2], [var1, var2] = self.VITAE(obj_vecs)
+                theta_mean, theta_var = self.vit_decoder(z1)
+
+            elif self.vitae_mode == "cond":
+                mu1, var1, z1 = self.VITAE.forward_enc1(obj_vecs)
+                theta_mean, theta_var = self.vit_decoder(z1)
+                obj_vecs_new = self.VITAE.stn(obj_vecs[:,:, None, None], theta_mean, inverse=True) #.repeat(1, 1, 1, 1)
+                #print("Done transform 1")
+                mu2, var2, z2 = self.VITAE.forward_enc2(obj_vecs_new)
+            else:
+                print("VITAE mode not supported!")
+                assert False
+
             obj_vecs = z2
+            if evaluating:
+                #normal_dist = tdist.Normal(loc=get_mean(self.spade_blocks), scale=get_std(self.spade_blocks))
+                highlevel_noise = torch.randn_like(obj_vecs) #normal_dist.sample([obj_vecs.shape[0]])
+                obj_vecs = obj_vecs + (highlevel_noise.cuda() * (1 - feats_keep))
 
         # End Disentangling
 
         layout, boxes_pred, masks_pred, generated = self.obj_to_layout(obj_vecs, num_objs, feats_prior, boxes_gt, evaluating, in_image, obj_to_img, keep_box_idx,
-                                             keep_feat_idx, combine_gt_pred_box_idx, box_keep, feats_keep, imgs_src, masks_gt) #, layout_boxes
+                                             keep_feat_idx, combine_gt_pred_box_idx, box_keep, feats_keep, imgs_src, masks_gt, keep_image_idx) #, layout_boxes
         #print("layout: ", layout.shape) #bsx 288x64x64
         if self.is_disentangled and disentangled_v2 and disentangled_v3 and self.dis_objs:
             for obj_num in range(obj_vecs.shape[0]):  # batch_size
@@ -500,12 +518,13 @@ class SIMSGModel(nn.Module):
                 # print(img[im_id].shape)
                 x1, y1, x2, y2 = self.bbox_coordinates_with_margin(boxes_pred[obj_num], 0, layout[im_id])
                 # print("im_id: ", im_id, x1, y1, x2, y2)
-                if x2 <= x1 or y2 <= y1:
+                if x2 <= x1+1 or y2 <= y1+1:
                     continue
                 # im_patch = img[im_id, :, x1:x2, y1:y2]
                 # im_patch = im_patch.unsqueeze(0) #[None, :, :, :]
+                #print(layout.shape)
                 layout[im_id, :, y1:y2, x1:x2] = \
-                    self.VITAE.stn(layout[im_id, :, y1:y2, x1:x2].clone().unsqueeze(0), theta_mean[obj_num],
+                    self.VITAE.stn(layout[im_id, :, y1:y2, x1:x2].clone().unsqueeze(0), theta_mean[obj_num].unsqueeze(0),
                                    inverse=False)[0]
         
         if self.is_disentangled and disentangled_v2 and not self.dis_objs:
@@ -514,7 +533,6 @@ class SIMSGModel(nn.Module):
             theta_mean, theta_var = self.vit_decoder(z1)
             layout = z2
             layout = layout.view(layout_shape)
-            #print("lt: ", layout.shape)
 
         
         img = self.decoder_net(layout)
@@ -524,17 +542,15 @@ class SIMSGModel(nn.Module):
             if not disentangled_v3:
                 for obj_num in range(obj_vecs.shape[0]): #batch_size
                     im_id = obj_to_img[obj_num]
-                    #print(img[im_id].shape)
                     x1, y1, x2, y2 = self.bbox_coordinates_with_margin(boxes_pred[obj_num], 0, img[im_id])
-                    #print("im_id: ", im_id, x1, y1, x2, y2)
                     if x2 <= x1 or y2 <= y1:
                         continue
                     # im_patch = img[im_id, :, x1:x2, y1:y2]
                     #im_patch = im_patch.unsqueeze(0) #[None, :, :, :]
+                    print(img.shape)
                     img[im_id, :, y1:y2, x1:x2] = self.VITAE.stn(img[im_id, :, y1:y2, x1:x2].clone().unsqueeze(0), theta_mean[obj_num], inverse=False)[0]
 
             x_var = 0 #self.decoder_net_2(layout_var)
-            #print('xmean, theta', x_mean.shape, theta_mean.shape)
             #x_mean = self.VITAE.stn(patches, theta_mean, inverse=False)
             x_mean = img
             #x_var = self.VITAE.stn(x_var, theta_mean, inverse=False)

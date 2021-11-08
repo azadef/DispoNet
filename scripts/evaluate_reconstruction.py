@@ -118,6 +118,9 @@ def main():
 
     # initialize model and load checkpoint
     kwargs = checkpoint['model_kwargs']
+    #kwargs['gcn_mode'] = "DisenGCN"
+    kwargs['gcn_mode'] = "GCN"
+    print(kwargs)
     model = SIMSGModel(**kwargs)
     model.load_state_dict(checkpoint['model_state'])
     model.eval()
@@ -194,7 +197,8 @@ def eval_model(model, loader, device, vocab, use_gt_boxes=False, use_feats=False
                                   keep_image_idx=dropimage_indices, mode='eval')
 
             # OUTPUT
-            imgs_pred, boxes_pred, masks_pred, _, _ = model_out
+            imgs_pred, boxes_pred, masks_pred, _, _, vae_params = model_out
+            #imgs_pred, boxes_pred, masks_pred, _, _ = model_out
             # ----------------------------------------------------------------------------------------------------------
 
             # Save all box predictions

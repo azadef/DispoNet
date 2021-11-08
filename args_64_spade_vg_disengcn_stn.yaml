@@ -5,9 +5,9 @@ gpu: 0
 # DATA OPTIONS
 dataset: vg
 vg_image_dir: ./datasets/vg/images
-output_dir: experiments/vg_disenobjs_layout
+output_dir: experiments/vg_disenobjs_gcncpab
 checkpoint_name: spade_64_vg
-log_dir: experiments/vg_disenobjs_layout/logs/spade_64_vg
+log_dir: experiments/vg_disenobjs_gcncpab/logs/spade_64_vg
 
 # ARCHITECTURE OPTIONS
 image_size: !!python/tuple [64, 64]
@@ -37,7 +37,9 @@ feats_out_gcn: True
 is_baseline: False
 is_supervised: False
 is_disentangled: True
-gcn_mode: GCN
+gcn_mode: DisenGCN
+stn_type: cpab
+vitae_mode: uncond
 
 # LOGGING OPTIONS
 print_every: 500

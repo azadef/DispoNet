@@ -3,7 +3,7 @@ seed: 1 #1
 gpu: 0
 
 # DATA OPTIONS
-dataset: vg
+dataset: coco
 vg_image_dir: ./datasets/vg/images
 output_dir: experiments/vg_disenobjs_layout
 checkpoint_name: spade_64_vg

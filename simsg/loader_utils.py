@@ -1,4 +1,5 @@
 from simsg.data.vg import SceneGraphNoPairsDataset, collate_fn_nopairs
+from simsg.data.coco import CocoSceneGraphDataset, coco_collate_fn
 from simsg.data.clevr import SceneGraphWithPairsDataset, collate_fn_withpairs
 
 import json
@@ -73,6 +74,9 @@ def build_eval_loader(args, checkpoint, vocab_t=None, no_gt=False):
   if args.dataset == 'vg' or (no_gt and args.dataset == 'clevr'):
     dset = build_dset_nopairs(args, checkpoint)
     collate_fn = collate_fn_nopairs
+  if args.dataset == 'coco':
+    _, _, dset = build_coco_dsets(args)
+    collate_fn = coco_collate_fn
   elif args.dataset == 'clevr':
     dset = build_dset_withpairs(args, checkpoint, vocab_t)
     collate_fn = collate_fn_withpairs
@@ -87,6 +91,39 @@ def build_eval_loader(args, checkpoint, vocab_t=None, no_gt=False):
 
   return loader
 
+def build_coco_dsets(args):
+    dset_kwargs = {
+      'image_dir': args.coco_train_image_dir,
+      'instances_json': args.coco_train_instances_json,
+      'stuff_json': args.coco_train_stuff_json,
+      'stuff_only': args.coco_stuff_only,
+      'image_size': args.image_size,
+      'mask_size': args.mask_size,
+      'max_samples': args.num_train_samples,
+      'min_object_size': args.min_object_size,
+      'min_objects_per_image': args.min_objects_per_image,
+      'instance_whitelist': args.instance_whitelist,
+      'stuff_whitelist': args.stuff_whitelist,
+      'include_other': args.coco_include_other,
+      'include_relationships': args.include_relationships,
+      'no_mask': args.coco_no_mask,
+    }
+    train_dset = CocoSceneGraphDataset(**dset_kwargs)
+    num_objs = train_dset.total_objects()
+    num_imgs = len(train_dset)
+    print('Training dataset has %d images and %d objects' % (num_imgs, num_objs))
+    print('(%.2f objects per image)' % (float(num_objs) / num_imgs))
+
+    dset_kwargs['image_dir'] = args.coco_val_image_dir
+    dset_kwargs['instances_json'] = args.coco_val_instances_json
+    dset_kwargs['stuff_json'] = args.coco_val_stuff_json
+    dset_kwargs['max_samples'] = args.num_val_samples
+    val_dset = CocoSceneGraphDataset(**dset_kwargs)
+
+    assert train_dset.vocab == val_dset.vocab
+    vocab = json.loads(json.dumps(train_dset.vocab))
+
+    return vocab, train_dset, val_dset
 
 def build_train_dsets(args):
   print("building unpaired %s dataset" % args.dataset)
@@ -119,6 +156,10 @@ def build_train_loaders(args):
   if args.dataset == 'vg' or (args.dataset == "clevr" and not args.is_supervised):
     vocab, train_dset, val_dset = build_train_dsets(args)
     collate_fn = collate_fn_nopairs
+
+  if args.dataset == 'coco':
+    vocab, train_dset, val_dset = build_coco_dsets(args)
+    collate_fn = coco_collate_fn
   elif args.dataset == 'clevr':
     vocab, train_dset, val_dset, test_dset = build_clevr_supervised_train_dsets(args)
     collate_fn = collate_fn_withpairs

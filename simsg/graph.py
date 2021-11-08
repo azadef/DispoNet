@@ -20,7 +20,9 @@ from simsg.layers import build_mlp
 import numpy as np
 import torch.nn.functional as fn
 
-
+import dgl
+import dgl.function as dgl_fn
+from dgl.nn.pytorch import edge_softmax, GraphConv
 """
 PyTorch modules for dealing with graphs.
 """
@@ -340,3 +342,353 @@ class SplitMLP(nn.Module):
     x = self.mlps(x)
     x = x.view(n, -1)
     return x
+
+class FactorTripletGCN(nn.Module):
+    def __init__(self, args):
+      super(FactorTripletGCN, self).__init__()
+      self.Din_obj = args.input_dim_obj
+      self.Din_pred = args.input_dim_pred
+      self.H = args.hidden_dim
+      self.Dout = args.out_dim
+
+      # feat = torch.ones(1, in_dim)
+
+      # g, features, train_mask, val_mask, test_mask, factor_graph = (None, feat, None, None, None, None)
+      g = None
+
+      # num_feats = features.shape[1]
+      # n_classes = out_dim
+
+      self.net1 = FactorGNN(g,
+                            args.num_layers,
+                            2 * args.input_dim_obj + args.input_dim_pred,  # num_feats,
+                            args.num_hidden,
+                            2 * args.hidden_dim + args.out_dim,  # n_classes,
+                            args.num_latent,
+                            args.in_drop,
+                            args.residual)
+
+      self.net2 = FactorGNN(g,
+                            args.num_layers,
+                            args.hidden_dim,  # num_feats,
+                            args.num_hidden,
+                            args.out_dim,  # n_classes,
+                            args.num_latent,
+                            args.in_drop,
+                            args.residual)
+
+      # self.net1 = FactorGNN(3 * in_dim, 2 * hidden_dim + out_dim, hyperpm)
+      # self.net2 = FactorGNN(hidden_dim, out_dim, hyperpm)
+
+    def compute_disentangle_loss(self):
+      # compute disentangle loss at each layer
+      # return: list of loss
+      net1_loss = self.net1.compute_disentangle_loss()
+      net1_loss = self.net1.merge_loss(net1_loss)
+      net2_loss = self.net2.compute_disentangle_loss()
+      net2_loss = self.net2.merge_loss(net2_loss)
+      loss_list = net1_loss + net2_loss
+      # loss_list = [net1_loss, net2_loss]
+      # loss_list = torch.as_tensor(loss_list)
+      return loss_list
+
+    def extract_info(self, obj_vecs, pred_vecs, edges):
+      self.dtype, self.device = obj_vecs.dtype, obj_vecs.device
+      self.O, self.T = obj_vecs.size(0), pred_vecs.size(0)
+      # Din, H, Dout = self.input_dim, self.hidden_dim, self.output_dim
+
+      # Break apart indices for subjects and objects; these have shape (T,)
+      self.s_idx = edges[:, 0].contiguous()
+      self.o_idx = edges[:, 1].contiguous()
+
+      # Get current vectors for subjects and objects; these have shape (T, Din)
+      cur_s_vecs = obj_vecs[self.s_idx]
+      cur_o_vecs = obj_vecs[self.o_idx]
+
+      # Get current vectors for triples; shape is (T, 3 * Din)
+      # Pass through net1 to get new triple vecs; shape is (T, 2 * H + Dout)
+      cur_t_vecs = torch.cat([cur_s_vecs, pred_vecs, cur_o_vecs], dim=1)
+      return cur_t_vecs
+
+    def pool_objs(self, out_feats):
+      # Break apart into new s, p, and o vecs; s and o vecs have shape (T, H) and
+      # p vecs have shape (T, Dout)
+      dtype, device = self.dtype, self.device
+      new_s_vecs = out_feats[:, :self.H]
+      pred_vecs = out_feats[:, self.H:(self.H + self.Dout)]
+      new_o_vecs = out_feats[:, (self.H + self.Dout):(2 * self.H + self.Dout)]
+
+      # Allocate space for pooled object vectors of shape (O, H)
+      pooled_obj_vecs = torch.zeros(self.O, self.H, dtype=dtype, device=device)
+
+      # Use scatter_add to sum vectors for objects that appear in multiple triples;
+      # we first need to expand the indices to have shape (T, D)
+      s_idx_exp = self.s_idx.view(-1, 1).expand_as(new_s_vecs)
+      o_idx_exp = self.o_idx.view(-1, 1).expand_as(new_o_vecs)
+      pooled_obj_vecs = pooled_obj_vecs.scatter_add(0, s_idx_exp, new_s_vecs)
+      pooled_obj_vecs = pooled_obj_vecs.scatter_add(0, o_idx_exp, new_o_vecs)
+
+      # Figure out how many times each object has appeared, again using
+      # some scatter_add trickery.
+      obj_counts = torch.zeros(self.O, dtype=dtype, device=device)
+      ones = torch.ones(self.T, dtype=dtype, device=device)
+      obj_counts = obj_counts.scatter_add(0, self.s_idx, ones)
+      obj_counts = obj_counts.scatter_add(0, self.o_idx, ones)
+
+      # Divide the new object vectors by the number of times they
+      # appeared, but first clamp at 1 to avoid dividing by zero;
+      # objects that appear in no triples will have output vector 0
+      # so this will not affect them.
+      obj_counts = obj_counts.clamp(min=1)
+      pooled_obj_vecs = pooled_obj_vecs / obj_counts.view(-1, 1)
+
+      return pooled_obj_vecs, pred_vecs
+
+    def forward(self, obj_vecs, pred_vecs, edges):
+      curr_t_vecs = self.extract_info(obj_vecs, pred_vecs, edges)
+      g = dgl.DGLGraph()
+      g = g.to("cuda:0")
+      g.add_nodes(curr_t_vecs.shape[0])
+      g.ndata['feat'] = curr_t_vecs
+
+      for src, dst in edges:
+        g.add_edges(src.item(), dst.item())
+
+      # print("cat vecs: ", curr_t_vecs.shape)
+      self.net1.g = g
+      out_feats = self.net1(curr_t_vecs)
+      # print("net 1 out: ", out_feats.shape)
+
+      so_vecs, pred_vecs = self.pool_objs(out_feats)
+      g2 = dgl.DGLGraph()
+      g2 = g2.to("cuda:0")
+      g2.add_nodes(so_vecs.shape[0])
+      g2.ndata['feat'] = so_vecs
+
+      for src, dst in edges:
+        g2.add_edges(src.item(), dst.item())
+      self.net2.g = g2
+      obj_vecs = self.net2(so_vecs)
+
+      return obj_vecs, pred_vecs
+
+
+class FactorGNN(nn.Module):
+    def __init__(self,
+                 g,
+                 num_layers,
+                 in_dim,
+                 num_hidden,
+                 num_classes,
+                 num_latent,
+                 feat_drop,
+                 residual):
+      super(FactorGNN, self).__init__()
+      self.g = g
+      self.layers = nn.ModuleList()
+      self.BNs = nn.ModuleList()
+      self.linears = nn.ModuleList()
+      self.feat_drop = feat_drop
+
+      self.linears.append(nn.Linear(in_dim, num_classes))
+
+      self.layers.append(DisentangleLayer(num_latent, in_dim, num_hidden, cat=True))
+      self.BNs.append(nn.BatchNorm1d(num_hidden))
+      self.linears.append(nn.Linear(num_hidden, num_classes))
+
+      self.layers.append(DisentangleLayer(num_latent, num_hidden, num_hidden, cat=True))
+      self.BNs.append(nn.BatchNorm1d(num_hidden))
+      self.linears.append(nn.Linear(num_hidden, num_classes))
+
+      self.layers.append(DisentangleLayer(max(num_latent // 2, 1), num_hidden, num_hidden, cat=True))
+      self.BNs.append(nn.BatchNorm1d(num_hidden))
+      self.linears.append(nn.Linear(num_hidden, num_classes))
+
+      self.layers.append(DisentangleLayer(max(num_latent // 2, 1), num_hidden, num_hidden, cat=True))
+      self.BNs.append(nn.BatchNorm1d(num_hidden))
+      self.linears.append(nn.Linear(num_hidden, num_classes))
+
+      self.layers.append(DisentangleLayer(max(num_latent // 2 // 2, 1), num_hidden, num_hidden, cat=True))
+      self.BNs.append(nn.BatchNorm1d(num_hidden))
+      self.linears.append(nn.Linear(num_hidden, num_classes))
+
+      self.activate = torch.nn.ReLU()
+
+    def forward(self, inputs):
+      self.feat_list = []
+
+      feat = inputs
+      self.feat_list.append(feat)
+      for layer, bn in zip(self.layers, self.BNs):
+        # feat = torch_fn.dropout(feat, self.feat_drop)
+        pre_feat = feat
+        feat = layer(self.g, feat)
+        feat = bn(feat)
+        # feat = feat + pre_feat
+        feat = self.activate(feat)
+
+        self.feat_list.append(feat)
+
+      logit = 0
+      for feat, linear in zip(self.feat_list, self.linears):
+        self.g.ndata['h'] = feat
+        # print("before feat 2: ", feat.shape)
+        # self.g = dgl.batch(self.g)
+        # h = dgl.sum_nodes(self.g, 'h') #azade
+        h = feat
+        # print("befaft feat 2: ", h.shape)
+        # h = self.activate(h)
+
+        h = linear(h)
+        # print("after feat 2: ", h.shape)
+        logit += fn.dropout(h, self.feat_drop)
+
+      return logit
+
+    def get_hidden_feature(self):
+      return self.feat_list
+
+    def get_factor(self):
+      # return factor graph at each disentangle layer as list
+      factor_list = []
+      for layer in self.layers:
+        if isinstance(layer, DisentangleLayer):
+          factor_list.append(layer.get_factor())
+      return factor_list
+
+    def compute_disentangle_loss(self):
+      # compute disentangle loss at each layer
+      # return: list of loss
+      loss_list = []
+      for layer in self.layers:
+        if isinstance(layer, DisentangleLayer):
+          loss_list.append(layer.compute_disentangle_loss())
+      return loss_list
+
+    @staticmethod
+    def merge_loss(list_loss):
+      total_loss = 0
+      for loss in list_loss:
+        discrimination_loss, distribution_loss = loss[0], loss[1]
+        total_loss += discrimination_loss
+        # total_loss += distribution_loss
+      return total_loss
+
+
+class DisentangleLayer(nn.Module):
+  def __init__(self, n_latent, in_dim, out_dim, cat=True):
+    super(DisentangleLayer, self).__init__()
+    # init self.g as None, after forward step, it will be replaced
+    self.g = None
+
+    self.n_latent = n_latent
+    self.n_feat_latent = out_dim // self.n_latent if cat else out_dim
+    self.cat = cat
+
+    self.linear = nn.Linear(in_dim, self.n_feat_latent)
+    self.att_ls = nn.ModuleList()
+    self.att_rs = nn.ModuleList()
+    for latent_i in range(self.n_latent):
+      self.att_ls.append(nn.Linear(self.n_feat_latent, 1))
+      self.att_rs.append(nn.Linear(self.n_feat_latent, 1))
+
+    # define for the additional losses
+    self.graph_to_feat = GraphEncoder(self.n_feat_latent, self.n_feat_latent // 2)
+    self.classifier = nn.Linear(self.n_feat_latent, self.n_latent)
+    self.loss_fn = nn.BCEWithLogitsLoss()  # azade CrossEntropyLoss()
+
+  def forward(self, g, inputs):
+    self.g = g.local_var()
+    out_feats = []
+    hidden = self.linear(inputs)
+    self.hidden = hidden
+    for latent_i in range(self.n_latent):
+      # compute factor features of nodes
+      a_l = self.att_ls[latent_i](hidden)
+      a_r = self.att_rs[latent_i](hidden)
+      self.g.ndata.update({f'feat_{latent_i}': hidden,
+                           f'a_l_{latent_i}': a_l,
+                           f'a_r_{latent_i}': a_r})
+      self.g.apply_edges(dgl_fn.u_add_v(f'a_l_{latent_i}', f'a_r_{latent_i}', f"factor_{latent_i}"))
+      self.g.edata[f"factor_{latent_i}"] = torch.sigmoid(6.0 * self.g.edata[f"factor_{latent_i}"])
+      feat = self.g.ndata[f'feat_{latent_i}']
+
+      # graph conv on the factor graph
+      norm = torch.pow(self.g.in_degrees().float().clamp(min=1), -0.5)
+      shp = norm.shape + (1,) * (feat.dim() - 1)
+      norm = torch.reshape(norm, shp).to(feat.device)
+      feat = feat * norm
+
+      # generate the output features
+      self.g.ndata['h'] = feat
+      self.g.update_all(dgl_fn.u_mul_e('h', f"factor_{latent_i}", 'm'),
+                        dgl_fn.sum(msg='m', out='h'))
+      out_feats.append(self.g.ndata['h'].unsqueeze(-1))
+
+    if self.cat:
+      return torch.cat(tuple([rst.squeeze(-1) for rst in out_feats]), -1)
+    else:
+      return torch.mean(torch.cat(tuple(out_feats), -1), -1)
+
+  def compute_disentangle_loss(self):
+    assert self.g is not None, "compute disentangle loss need to be called after forward pass"
+
+    # compute discrimination loss
+    factors_feat = [self.graph_to_feat(self.g, self.hidden, f"factor_{latent_i}").squeeze()
+                    for latent_i in range(self.n_latent)]
+
+    # labels = [torch.ones(f.shape[0]) * i for i, f in enumerate(factors_feat)]
+    # labels = torch.cat(tuple(labels), 0).long().cuda()
+    factors_feat = torch.cat(tuple(factors_feat), 0)
+    factors_feat = factors_feat.reshape(-1, self.n_feat_latent)
+
+    # labels = labels.reshape(-1, self.n_feat_latent)
+    # print(factors_feat.shape, self.n_feat_latent, self.n_latent)
+
+    pred = self.classifier(factors_feat)
+    labels = torch.ones_like(pred)  # [torch.ones(f.shape[0]) * i for i, f in enumerate(factors_feat)]
+    # labels = torch.cat(tuple(labels), 0).long().cuda()
+    # pred = pred.reshape(1, -1)
+    # print(pred.shape, labels.shape, factors_feat.shape)
+    discrimination_loss = self.loss_fn(pred, labels)
+
+    distribution_loss = 0
+
+    return [discrimination_loss, distribution_loss]
+
+  def get_factor(self):
+    g = self.g.local_var()
+    return g
+
+
+class GraphEncoder(nn.Module):
+  def __init__(self, in_dim, hidden_dim):
+    super(GraphEncoder, self).__init__()
+    self.linear1 = nn.Linear(in_dim, hidden_dim)
+    self.linear2 = nn.Linear(hidden_dim, in_dim)
+
+  def forward(self, g, inputs, factor_key):
+    g = g.local_var()
+    # graph conv on the factor graph
+    feat = self.linear1(inputs)
+    norm = torch.pow(g.in_degrees().float().clamp(min=1), -0.5)
+    shp = norm.shape + (1,) * (feat.dim() - 1)
+    norm = torch.reshape(norm, shp).to(feat.device)
+    feat = feat * norm
+
+    g.ndata['h'] = feat
+    g.update_all(dgl_fn.u_mul_e('h', factor_key, 'm'),
+                 dgl_fn.sum(msg='m', out='h'))
+    g.ndata['h'] = torch.tanh(g.ndata['h'])
+
+    # graph conv on the factor graph
+    feat = self.linear2(g.ndata['h'])
+    feat = feat * norm
+
+    g.ndata['h'] = feat
+    g.update_all(dgl_fn.u_mul_e('h', factor_key, 'm'),
+                 dgl_fn.sum(msg='m', out='h'))
+    g.ndata['h'] = torch.tanh(g.ndata['h'])
+
+    h = dgl.mean_nodes(g, 'h').unsqueeze(-1)
+    h = torch.tanh(h)
