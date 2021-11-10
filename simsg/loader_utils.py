@@ -157,7 +157,7 @@ def build_train_loaders(args):
     vocab, train_dset, val_dset = build_train_dsets(args)
     collate_fn = collate_fn_nopairs
 
-  if args.dataset == 'coco':
+  elif args.dataset == 'coco':
     vocab, train_dset, val_dset = build_coco_dsets(args)
     collate_fn = coco_collate_fn
   elif args.dataset == 'clevr':
