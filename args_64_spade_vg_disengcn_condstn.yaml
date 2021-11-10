@@ -1,13 +1,13 @@
 # arguments for easier parsing
 seed: 1 #1
-gpu: 0
+gpu: 1
 
 # DATA OPTIONS
 dataset: vg
 vg_image_dir: ./datasets/vg/images
-output_dir: experiments/vg_disenobjs_gcncpab
+output_dir: experiments/vg_disenobjs_gcncondcpab
 checkpoint_name: spade_64_vg
-log_dir: experiments/vg_disenobjs_gcncpab/logs/spade_64_vg
+log_dir: experiments/vg_disenobjs_gcncondcpab/logs/spade_64_vg
 
 # ARCHITECTURE OPTIONS
 image_size: !!python/tuple [64, 64]

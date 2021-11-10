@@ -359,7 +359,10 @@ def main(args):
   #model = nn.DataParallel(model, device_ids=[0, 1])
   #model.to(device)
   #print(model)
-
+  #model_params = filter(lambda p: p.requires_grad, model.parameters())
+  #for param in model_params:
+  #  print(param)
+  #assert False
   # use to freeze parts of the network (VGG feature extraction)
   optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
                                lr=args.learning_rate)

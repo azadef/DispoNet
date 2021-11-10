@@ -38,6 +38,7 @@ is_baseline: False
 is_supervised: False
 is_disentangled: True
 gcn_mode: DisenGCN
+num_iterations: 600000
 
 # LOGGING OPTIONS
 print_every: 500
