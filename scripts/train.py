@@ -65,7 +65,7 @@ def argument_parser():
   parser.add_argument('--learning_rate', default=2e-4, type=float)
 
   # Switch the generator to eval mode after this many iterations
-  parser.add_argument('--eval_mode_after', default=300000, type=int)
+  parser.add_argument('--eval_mode_after', default=600000, type=int)
 
   # Dataset options
   parser.add_argument('--image_size', default='64,64', type=int_tuple)
@@ -171,6 +171,12 @@ def argument_parser():
   parser.add_argument('--spade_gen_blocks', default=False, type=bool_flag)
   parser.add_argument('--layout_pooling', default="sum", type=str)
 
+  # -----------
+  # Distributed
+  # -----------
+  parser.add_argument('--local_rank', type=int, default=1, help="local rank for distributed training")
+  parser.add_argument('--distributed', default=False, type=bool_flag)
+
   return parser
 
 
@@ -209,7 +215,7 @@ def build_model(args, vocab):
       'spade_blocks': args.spade_gen_blocks,
       'layout_pooling': args.layout_pooling,
       'is_disentangled': args.is_disentangled,
-      'GCN_mode': args.gcn_mode,
+      'gcn_mode': args.gcn_mode,
       'stn_type': args.stn_type,
       'vitae_mode': args.vitae_mode
     }
@@ -356,8 +362,10 @@ def main(args):
   vocab, train_loader, val_loader = build_train_loaders(args)
   model, model_kwargs = build_model(args, vocab)
   model.type(float_dtype)
-  #model = nn.DataParallel(model, device_ids=[0, 1])
-  #model.to(device)
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  if args.distributed:
+    model = nn.DataParallel(model, device_ids=[0, 1])
+    model.to(device)
   #print(model)
   #model_params = filter(lambda p: p.requires_grad, model.parameters())
   #for param in model_params:
@@ -437,13 +445,16 @@ def main(args):
         optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.learning_rate)
       t += 1
       batch = [tensor.cuda() for tensor in batch]
+      #batch = [tensor.to(device) for tensor in batch]
       masks = None
       imgs_src = None
 
-      if args.dataset == "vg" or args.dataset == "coco" or (args.dataset == "clevr" and not args.is_supervised):
+      if args.dataset == "vg" or (args.dataset == "clevr" and not args.is_supervised):
         imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = batch
         #imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = imgs.to(device), objs.to(device), boxes.to(device)\
         #  , triples.to(device), obj_to_img.to(device), triple_to_img.to(device), imgs_in.to(device)
+      elif args.dataset == "coco":
+          imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, imgs_in = batch
       elif args.dataset == "clevr":
         imgs, imgs_src, objs, objs_src, boxes, boxes_src, triples, triples_src, obj_to_img, \
         triple_to_img, imgs_in = batch
