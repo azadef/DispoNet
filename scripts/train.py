@@ -281,8 +281,10 @@ def check_model(args, t, loader, model):
       masks = None
       imgs_src = None
 
-      if args.dataset == "vg" or args.dataset == "coco" or (args.dataset == "clevr" and not args.is_supervised):
+      if args.dataset == "vg" or (args.dataset == "clevr" and not args.is_supervised):
         imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = batch
+      elif args.dataset == "coco":
+        imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, imgs_in = batch
       elif args.dataset == "clevr":
         imgs, imgs_src, objs, objs_src, boxes, boxes_src, triples, triples_src, obj_to_img, \
         triple_to_img, imgs_in = batch
