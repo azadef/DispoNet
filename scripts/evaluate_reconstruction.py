@@ -31,7 +31,7 @@ from simsg.data import imagenet_deprocess_batch
 from simsg.metrics import jaccard
 from simsg.model import SIMSGModel
 from simsg.loader_utils import build_eval_loader
-from simsg.utils import int_tuple, bool_flag
+from simsg.utils import int_tuple, bool_flag, str_tuple
 
 from scripts.eval_utils import bbox_coordinates_with_margin, parse_bool, visualize_imgs_boxes, visualize_scene_graphs
 
@@ -42,13 +42,41 @@ from PerceptualSimilarity import models
 GPU = 0
 EVAL_ALL = True         # evaluate on all bounding boxes (batch size=1)
 IGNORE_SMALL = True
+COCO_DIR = os.path.expanduser('~/MyHDD/Data/coco')
 
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--exp_dir', default='./experiments/vg/')
 parser.add_argument('--experiment', default="spade_vg", type=str)
 parser.add_argument('--checkpoint', default=None)
-parser.add_argument('--dataset', default='vg', choices=['clevr', 'vg'])
+parser.add_argument('--dataset', default='coco', choices=['clevr', 'vg', 'coco'])
+
+# Coco
+# COCO-specific options
+parser.add_argument('--coco_train_image_dir',
+                    default=os.path.join(COCO_DIR, 'images/train2017'))
+parser.add_argument('--coco_val_image_dir',
+                    default=os.path.join(COCO_DIR, 'images/val2017'))
+parser.add_argument('--coco_train_instances_json',
+                    default=os.path.join(COCO_DIR, 'annotations/instances_train2017.json'))
+parser.add_argument('--coco_train_stuff_json',
+                    default=None)
+parser.add_argument('--coco_val_instances_json',
+                    default=os.path.join(COCO_DIR, 'annotations/instances_val2017.json'))
+parser.add_argument('--coco_val_stuff_json',
+                    default=None)
+parser.add_argument('--instance_whitelist', default=None, type=str_tuple)
+parser.add_argument('--stuff_whitelist', default=None, type=str_tuple)
+parser.add_argument('--coco_include_other', default=False, type=bool_flag)
+parser.add_argument('--min_object_size', default=0.02, type=float)
+parser.add_argument('--min_objects_per_image', default=3, type=int)
+parser.add_argument('--coco_stuff_only', default=True, type=bool_flag)
+parser.add_argument('--coco_no_mask', default=False, type=bool_flag)
+parser.add_argument('--mask_size', default=16, type=int) # Set this to 0 to use no masks
+parser.add_argument('--num_train_samples', default=None, type=int)
+parser.add_argument('--num_val_samples', default=1024, type=int)
+parser.add_argument('--include_relationships', default=True, type=bool_flag)
+
 parser.add_argument('--with_feats', default=True, type=bool_flag)
 parser.add_argument('--generative', default=False, type=bool_flag)
 parser.add_argument('--predgraphs', default=False, type=bool_flag)
@@ -95,6 +123,7 @@ USE_GT_BOXES = True     # use ground truth bounding boxes for evaluation
 print("feats", args.with_feats)
 torch.cuda.set_device(GPU)
 device = torch.device(GPU)
+#device = torch.device("cpu")
 
 
 def main():
@@ -119,11 +148,14 @@ def main():
     # initialize model and load checkpoint
     kwargs = checkpoint['model_kwargs']
     #kwargs['gcn_mode'] = "DisenGCN"
-    kwargs['gcn_mode'] = "GCN"
+    kwargs['gcn_mode'] = "DisenGCN"
     print(kwargs)
     model = SIMSGModel(**kwargs)
     model.load_state_dict(checkpoint['model_state'])
     model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+
     model.to(device)
 
     # create data loaders
@@ -135,6 +167,7 @@ def main():
 
 
 def eval_model(model, loader, device, vocab, use_gt_boxes=False, use_feats=False, filter_box=False):
+    #global GPU
     all_boxes = defaultdict(list)
     total_iou = []
     total_boxes = 0
@@ -149,7 +182,7 @@ def eval_model(model, loader, device, vocab, use_gt_boxes=False, use_feats=False
     margin = 2
 
     ## Initializing the perceptual loss model
-    lpips_model = models.PerceptualLoss(model='net-lin',net='alex',use_gpu=True)
+    lpips_model = models.PerceptualLoss(model='net-lin',net='alex',use_gpu=True, gpu_ids=[0])
     perceptual_error_image = []
     # ---------------------------------------
 
@@ -163,10 +196,15 @@ def eval_model(model, loader, device, vocab, use_gt_boxes=False, use_feats=False
             batch = [tensor.to(device) for tensor in batch]
             masks = None
             #len", len(batch))
+            if args.dataset == "vg" or args.dataset == "clevr":
+                imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = [b.to(device) for b in batch]
+            elif args.dataset == "coco":
+                imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, imgs_in = batch
+            else:
+                print("Dataset not defined!")
+                assert False
 
-            imgs, objs, boxes, triples, obj_to_img, triple_to_img, imgs_in = [b.to(device) for b in batch]
             predicates = triples[:, 1]
-
             #EVAL_ALL = True
             if not args.generative:
                 imgs, imgs_in, objs, boxes, triples, obj_to_img, \
@@ -187,17 +225,24 @@ def eval_model(model, loader, device, vocab, use_gt_boxes=False, use_feats=False
                 # visualize scene graphs for debugging purposes
                 visualize_scene_graphs(obj_to_img, objs, triples, vocab, device)
 
-            if use_gt_boxes:
-                model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, masks_gt=masks, src_image=imgs_in,
+            try:
+              if use_gt_boxes:
+                  model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, masks_gt=masks, src_image=imgs_in,
                                   keep_box_idx=torch.ones_like(dropimage_indices), keep_feat_idx=dropfeats_indices,
                                   keep_image_idx=dropimage_indices, mode='eval')
-            else:
-                model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, src_image=imgs_in,
+              else:
+                  model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, src_image=imgs_in,
                                   keep_box_idx=dropimage_indices, keep_feats_idx=dropfeats_indices,
                                   keep_image_idx=dropimage_indices, mode='eval')
-
+            except:
+                print("Error, not found box", num_batches)
+                #batch = next(iter(loader))
+                continue
+            
             # OUTPUT
-            imgs_pred, boxes_pred, masks_pred, _, _, vae_params = model_out
+            #if args.is_disentangled:
+            imgs_pred, boxes_pred, masks_pred, _, _, _ = model_out
+            #else:
             #imgs_pred, boxes_pred, masks_pred, _, _ = model_out
             # ----------------------------------------------------------------------------------------------------------
 
@@ -237,6 +282,7 @@ def eval_model(model, loader, device, vocab, use_gt_boxes=False, use_feats=False
             mae_per_image.append(torch.mean(
                 torch.abs(imgs - imgs_pred).view(imgs.shape[0], -1), 1).cpu().numpy())
 
+            #print(imgs.shape[0])
             for s in range(imgs.shape[0]):
                 # get coordinates of target
                 left, right, top, bottom = bbox_coordinates_with_margin(boxes[s, :], margin, imgs)
