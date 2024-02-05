@@ -1,28 +1,28 @@
-# SIMSG
+# DisPostioNet
 
 This is the code accompanying the paper
 
-**Semantic Image Manipulation Using Scene Graphs | <a href="https://arxiv.org/pdf/2004.03677.pdf">arxiv</a>** <br/>
-Helisa Dhamo*, Azade Farshad*, Iro Laina, Nassir Navab, Gregory D. Hager, Federico Tombari, Christian Rupprecht <br/>
-**CVPR 2020**
+** DisPositioNet: Disentangled Pose andIdentity in Semantic Image Manipulation | <a href="https://arxiv.org/pdf/2211.05499.pdf">arxiv</a>  , <a href="https://bmvc2022.mpi-inf.mpg.de/340/">BMVC Website</a>  ** <br/>
+Azade Farshad*, Yousef Yeganeh*, Helisa Dhamo, Federico Tombari, Nassir Navab <br/>
+**BMVC 2022**
 
-The work for this paper was done at the Technical University of Munich.
+The work for this paper was done at the Technical University of Munich and is an extension of our previous work <a href="https://he-dhamo.github.io/SIMSG/">"Semantic image manipulation using scene graphs"</a>.
 
-In our work, we address the novel problem of image manipulation from scene graphs, in which a user can edit images by 
-merely applying changes in the nodes or edges of a semantic graph that is generated from the image.
+In this work, we propose DisPositioNet, a model that learns a disentangled representation for each object for the task of image manipulation using scene graphs in a self-supervised manner. Our framework enables the disentanglement of the variational latent embeddings as well as the feature representation in the graph. 
 
-We introduce a spatio-semantic scene graph network that does not require direct supervision for constellation changes or 
-image edits. This makes it possible to train the system from existing real-world datasets with no additional annotation 
-effort.
+In addition to producing more realistic images due to the decomposition of features like pose and identity, our method takes advantage of the probabilistic sampling in the intermediate features to generate more diverse images in object replacement or addition tasks. 
+
 
 If you find this code useful in your research, please cite
 ```
-@inproceedings{dhamo2020_SIMSG,
-  title={Semantic Image Manipulation Using Scene Graphs},
-  author={Dhamo, Helisa and Farshad, Azade, and Laina, Iro and Navab, Nassir and
-          Hager, Gregory D., and Tombari, Federico and Rupprecht, Christian},
-  booktitle={CVPR},
-  year={2020}
+@inproceedings{Farshad_2022_BMVC,
+author    = {Azade Farshad and Yousef Yeganeh and Helisa Dhamo and Federico Tombari and Nassir Navab},
+title     = {DisPositioNet: Disentangled Pose and Identity in Semantic Image Manipulation},
+booktitle = {33rd British Machine Vision Conference 2022, {BMVC} 2022, London, UK, November 21-24, 2022},
+publisher = {{BMVA} Press},
+year      = {2022},
+url       = {https://bmvc2022.mpi-inf.mpg.de/0340.pdf}
+}
 ```
 
 ## Setup
@@ -234,19 +234,15 @@ implementation loads GT or predicted graph. Then you can apply one of the follow
   Note that the current implementation only supports object removal (cannot remove relationships); though the model 
   supports this and the GUI implementation can be extended accordingly.
 
-After you have completed the change, click on "Generate image". Alternatively you can save the image. 
+After you have completed the change, click on "Generate image". Alternatively, you can save the image. 
 
 ## Download
 
-Visit the <a href="https://he-dhamo.github.io/SIMSG/#download">project page</a> to download model checkpoints, 
-predicted scene graphs and the CLEVR data with edit pairs.
-
-We also provide the code used to generate the CLEVR data with change pairs. Please follow the instructions from 
-[here](simsg/data/clevr_gen/README_CLEVR.md).
+To be filled.
 
 ## Acknoledgement
 
-This code is based on the <a href="https://github.com/google/sg2im"> sg2im repository </a>. 
+This code is based on the <a href="https://github.com/google/sg2im"> sg2im and <a href="https://github.com/he-dhamo/simsg/"> SIMSG repositories </a>. 
 
 The following directory is taken from the <a href="https://github.com/NVlabs/SPADE"> SPADE </a> repository:
 - simsg/SPADE/
